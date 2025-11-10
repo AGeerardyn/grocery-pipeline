@@ -138,7 +138,12 @@ def parse_route():
     # Shared-secret guard
     expected = os.environ.get("SHARED_SECRET")
     got = request.headers.get("X-Secret")
-    if expected and got != expected:
+    if not expected:
+        # Server misconfiguration – do not proceed
+        return jsonify({"error": "server misconfigured: missing SHARED_SECRET"}), 500
+
+    got = request.headers.get("X-Secret", "")
+    if not hmac.compare_digest(got, expected):
         return jsonify({"error": "unauthorized"}), 401
 
     # Size guard (10 MB)
