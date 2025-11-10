@@ -1,45 +1,12 @@
-import io, re, json
+import io, re, os
 import pdfplumber
-import pandas as pd
 from flask import Flask, request, jsonify
-import os
 
 app = Flask(__name__)
 
 HOEVEELHEIDSV_CORRECT_AS_NEGATIVE = True
 
-@app.route("/", methods=["POST"])
-def parse():
-    # ---- Shared-secret guard (very first line in the handler) ----
-    expected = os.environ.get("SHARED_SECRET")
-    got = request.headers.get("X-Secret")
-    if expected and got != expected:
-        return jsonify({"error": "unauthorized"}), 401
-    # --------------------------------------------------------------
-
-    if "file" not in request.files:
-        return jsonify({"error": "no file"}), 400
-    f = request.files["file"]
-    rows = parse_pdf_bytes(f.read())
-    return jsonify(rows), 200
-
-    # Basic safety checks
-    if request.content_length and request.content_length > 10 * 1024 * 1024:
-        return jsonify({"error": "file too large"}), 413  # 10 MB limit
-
-    if "file" not in request.files:
-        return jsonify({"error": "no file"}), 400
-
-    f = request.files["file"]
-
-    # Require PDF mimetype and .pdf name
-    if (f.mimetype or "").lower() not in ("application/pdf", "application/x-pdf"):
-        return jsonify({"error": "invalid content type"}), 415
-    if not f.filename.lower().endswith(".pdf"):
-        return jsonify({"error": "invalid filename"}), 400
-
-    rows = parse_pdf_bytes(f.read())
-    return jsonify(rows), 200
+# -------------------- Helpers --------------------
 
 def euro_to_float(s: str):
     if s is None:
@@ -51,7 +18,8 @@ def euro_to_float(s: str):
         return None
 
 def clean_space(s: str) -> str:
-    return re.sub(r"\s+", " ", s or "").strip()
+    import re as _re
+    return _re.sub(r"\s+", " ", s or "").strip()
 
 re_regular = re.compile(
     r"""^[A-Z]\s+
@@ -156,19 +124,38 @@ def parse_pdf_bytes(pdf_bytes: bytes):
                     "Hoev.": None, "Gewicht (kg)": None, "Eenhprijs (EUR)": None,
                     "Bedrag (EUR)": bedrag, "Type": "korting_hoeveelheid"
                 })
-            continue
 
     return all_rows
+
+# -------------------- Routes --------------------
 
 @app.route("/", methods=["GET"])
 def health():
     return "OK", 200
 
 @app.route("/", methods=["POST"])
-def parse():
+def parse_route():
+    # Shared-secret guard
+    expected = os.environ.get("SHARED_SECRET")
+    got = request.headers.get("X-Secret")
+    if expected and got != expected:
+        return jsonify({"error": "unauthorized"}), 401
+
+    # Size guard (10 MB)
+    if request.content_length and request.content_length > 10 * 1024 * 1024:
+        return jsonify({"error": "file too large"}), 413
+
     if "file" not in request.files:
         return jsonify({"error": "no file"}), 400
+
     f = request.files["file"]
+
+    # Require PDF mimetype and .pdf name before reading
+    if (f.mimetype or "").lower() not in ("application/pdf", "application/x-pdf"):
+        return jsonify({"error": "invalid content type"}), 415
+    if not f.filename.lower().endswith(".pdf"):
+        return jsonify({"error": "invalid filename"}), 400
+
     rows = parse_pdf_bytes(f.read())
     return jsonify(rows), 200
 
