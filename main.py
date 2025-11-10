@@ -1,57 +1,11 @@
-import io, re, os
+import io, re, json
 import pdfplumber
+import pandas as pd
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
 HOEVEELHEIDSV_CORRECT_AS_NEGATIVE = True
-
-# -------------------- Routes --------------------
-
-@app.route("/", methods=["GET"])
-def health():
-    return "OK", 200
-
-@app.route("/", methods=["POST"])
-def parse_route():
-    # Shared-secret guard
-    expected = os.environ.get("SHARED_SECRET")
-    got = request.headers.get("X-Secret")
-    if not expected:
-        # Server misconfiguration – do not proceed
-        return jsonify({"error": "server misconfigured: missing SHARED_SECRET"}), 500
-
-    got = request.headers.get("X-Secret", "")
-    if not hmac.compare_digest(got, expected):
-        return jsonify({"error": "unauthorized"}), 401
-
-    # Size guard (10 MB)
-    if request.content_length and request.content_length > 10 * 1024 * 1024:
-        return jsonify({"error": "file too large"}), 413
-
-    if "file" not in request.files:
-        return jsonify({"error": "no file"}), 400
-
-    f = request.files["file"]
-
-    # Require PDF mimetype and .pdf name before reading
-    if (f.mimetype or "").lower() not in ("application/pdf", "application/x-pdf"):
-        return jsonify({"error": "invalid content type"}), 415
-    if not f.filename.lower().endswith(".pdf"):
-        return jsonify({"error": "invalid filename"}), 400
-
-    rows = parse_pdf_bytes(f.read())
-    return jsonify(rows), 200
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
-
-
-
-
-
-
-# -------------------- Helpers --------------------
 
 def euro_to_float(s: str):
     if s is None:
@@ -63,8 +17,7 @@ def euro_to_float(s: str):
         return None
 
 def clean_space(s: str) -> str:
-    import re as _re
-    return _re.sub(r"\s+", " ", s or "").strip()
+    return re.sub(r"\s+", " ", s or "").strip()
 
 re_regular = re.compile(
     r"""^[A-Z]\s+
@@ -169,6 +122,21 @@ def parse_pdf_bytes(pdf_bytes: bytes):
                     "Hoev.": None, "Gewicht (kg)": None, "Eenhprijs (EUR)": None,
                     "Bedrag (EUR)": bedrag, "Type": "korting_hoeveelheid"
                 })
+            continue
 
     return all_rows
 
+@app.route("/", methods=["GET"])
+def health():
+    return "OK", 200
+
+@app.route("/", methods=["POST"])
+def parse():
+    if "file" not in request.files:
+        return jsonify({"error": "no file"}), 400
+    f = request.files["file"]
+    rows = parse_pdf_bytes(f.read())
+    return jsonify(rows), 200
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)
