@@ -1,20 +1,32 @@
-import io, re, json
+import io, re, json, os, hmac, hashlib
 import pdfplumber
 import pandas as pd
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
+# --- SECURITY: read shared secret from env
+SHARED_SECRET = os.environ.get("SHARED_SECRET", "")  # must be set in Cloud Run
+HEADER_NAME = "X-Internal-Secret"                    # your private header name
+
+def has_valid_secret(req):
+    """Timing-safe header validation."""
+    provided = req.headers.get(HEADER_NAME, "")
+    if not SHARED_SECRET or not provided:
+        return False
+    # Compare hashed values to avoid early-exit timing differences on string length.
+    return hmac.compare_digest(
+        hashlib.sha256(provided.encode()).digest(),
+        hashlib.sha256(SHARED_SECRET.encode()).digest()
+    )
+
 HOEVEELHEIDSV_CORRECT_AS_NEGATIVE = True
 
 def euro_to_float(s: str):
-    if s is None:
-        return None
+    if s is None: return None
     s = s.strip().replace(".", "").replace(",", ".")
-    try:
-        return float(s)
-    except ValueError:
-        return None
+    try: return float(s)
+    except ValueError: return None
 
 def clean_space(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip()
@@ -25,26 +37,30 @@ re_regular = re.compile(
         (?P<name>.*?)\s+
         (?P<qty>\d+)\s+
         (?P<unit>\d+,\d{2,3})\s+
-        (?P<total>-?\d+,\d{2})$
-    """, re.VERBOSE
+        (?P<total>-?\d+,\d{2})$""",
+    re.VERBOSE
 )
+
 re_weighted = re.compile(
     r"""^[A-Z]\s+
         (?P<art>\d+)\s+
         (?P<left>.*?)\s+
         (?P<weight>\d+,\d{2,3})kg\s+
         (?P<eur_per>\d+,\d{2,3})\s+
-        (?P<total>-?\d+,\d{2})$
-    """, re.VERBOSE
+        (?P<total>-?\d+,\d{2})$""",
+    re.VERBOSE
 )
+
 re_discount = re.compile(
     r"""^Korting\ bon[^\S\r\n]*(?P<rawname>.*\S)\s+(?P<total>-?\d+,\d{2})$""",
     re.IGNORECASE
 )
+
 re_hoeveelheidsvoordeel = re.compile(
     r"""Hoeveelheidsvoordeel\s+toegekend:\s*€\s*(?P<amount>\d+,\d{2})\s*\(in\s+prijs\s+verrekend\)""",
     re.IGNORECASE
 )
+
 re_date = re.compile(r"\b(\d{2}/\d{2}/\d{4})\s+\d{2}:\d{2}\b")
 
 def parse_pdf_bytes(pdf_bytes: bytes):
@@ -55,83 +71,88 @@ def parse_pdf_bytes(pdf_bytes: bytes):
             t = (page.extract_text() or "")
             lines.extend([ln.rstrip() for ln in t.splitlines()])
 
-    date_match = re_date.search("\n".join(lines))
-    receipt_date = date_match.group(1) if date_match else "unknown"
+        date_match = re_date.search("\n".join(lines))
+        receipt_date = date_match.group(1) if date_match else "unknown"
 
-    last_item_name = None
-    last_item_art = None
+        last_item_name = None
+        last_item_art = None
 
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
 
-        m = re_weighted.match(line)
-        if m:
-            art = m.group("art")
-            name_left = clean_space(m.group("left"))
-            weight_kg = euro_to_float(m.group("weight"))
-            eur_per_kg = euro_to_float(m.group("eur_per"))
-            total = euro_to_float(m.group("total"))
-            all_rows.append({
-                "Datum": receipt_date, "Art.Nr": art, "Benaming": name_left,
-                "Hoev.": None, "Gewicht (kg)": weight_kg,
-                "Eenhprijs (EUR)": eur_per_kg, "Bedrag (EUR)": total, "Type": "gewicht"
-            })
-            last_item_name = name_left; last_item_art = art
-            continue
-
-        m = re_regular.match(line)
-        if m:
-            art = m.group("art")
-            name = clean_space(m.group("name"))
-            qty = int(m.group("qty"))
-            unit = euro_to_float(m.group("unit"))
-            total = euro_to_float(m.group("total"))
-            all_rows.append({
-                "Datum": receipt_date, "Art.Nr": art, "Benaming": name,
-                "Hoev.": qty, "Gewicht (kg)": None,
-                "Eenhprijs (EUR)": unit, "Bedrag (EUR)": total, "Type": "stuk"
-            })
-            last_item_name = name; last_item_art = art
-            continue
-
-        m = re_discount.match(line)
-        if m:
-            total = euro_to_float(m.group("total"))
-            if total and total > 0:
-                total = -total
-            benaming_for_discount = last_item_name or "korting op vorig artikel"
-            art_for_discount = last_item_art or "0000"
-            all_rows.append({
-                "Datum": receipt_date, "Art.Nr": art_for_discount,
-                "Benaming": benaming_for_discount, "Hoev.": None,
-                "Gewicht (kg)": None, "Eenhprijs (EUR)": None,
-                "Bedrag (EUR)": total, "Type": "korting"
-            })
-            continue
-
-        m = re_hoeveelheidsvoordeel.search(line)
-        if m:
-            amount = euro_to_float(m.group("amount"))
-            if amount is not None:
-                bedrag = -amount if HOEVEELHEIDSV_CORRECT_AS_NEGATIVE else amount
+            m = re_weighted.match(line)
+            if m:
+                art = m.group("art")
+                name_left = clean_space(m.group("left"))
+                weight_kg = euro_to_float(m.group("weight"))
+                eur_per_kg = euro_to_float(m.group("eur_per"))
+                total = euro_to_float(m.group("total"))
                 all_rows.append({
-                    "Datum": receipt_date, "Art.Nr": "0000",
-                    "Benaming": "hoeveelheidsvoordeel verrekend in prijs",
-                    "Hoev.": None, "Gewicht (kg)": None, "Eenhprijs (EUR)": None,
-                    "Bedrag (EUR)": bedrag, "Type": "korting_hoeveelheid"
+                    "Datum": receipt_date, "Art.Nr": art, "Benaming": name_left,
+                    "Hoev.": None, "Gewicht (kg)": weight_kg,
+                    "Eenhprijs (EUR)": eur_per_kg, "Bedrag (EUR)": total,
+                    "Type": "gewicht"
                 })
-            continue
+                last_item_name = name_left; last_item_art = art
+                continue
+
+            m = re_regular.match(line)
+            if m:
+                art = m.group("art")
+                name = clean_space(m.group("name"))
+                qty = int(m.group("qty"))
+                unit = euro_to_float(m.group("unit"))
+                total = euro_to_float(m.group("total"))
+                all_rows.append({
+                    "Datum": receipt_date, "Art.Nr": art, "Benaming": name,
+                    "Hoev.": qty, "Gewicht (kg)": None, "Eenhprijs (EUR)": unit,
+                    "Bedrag (EUR)": total, "Type": "stuk"
+                })
+                last_item_name = name; last_item_art = art
+                continue
+
+            m = re_discount.match(line)
+            if m:
+                total = euro_to_float(m.group("total"))
+                if total and total > 0:
+                    total = -total
+                benaming_for_discount = last_item_name or "korting op vorig artikel"
+                art_for_discount = last_item_art or "0000"
+                all_rows.append({
+                    "Datum": receipt_date, "Art.Nr": art_for_discount,
+                    "Benaming": benaming_for_discount, "Hoev.": None,
+                    "Gewicht (kg)": None, "Eenhprijs (EUR)": None,
+                    "Bedrag (EUR)": total, "Type": "korting"
+                })
+                continue
+
+            m = re_hoeveelheidsvoordeel.search(line)
+            if m:
+                amount = euro_to_float(m.group("amount"))
+                if amount is not None:
+                    bedrag = -amount if HOEVEELHEIDSV_CORRECT_AS_NEGATIVE else amount
+                    all_rows.append({
+                        "Datum": receipt_date, "Art.Nr": "0000",
+                        "Benaming": "hoeveelheidsvoordeel verrekend in prijs",
+                        "Hoev.": None, "Gewicht (kg)": None, "Eenhprijs (EUR)": None,
+                        "Bedrag (EUR)": bedrag, "Type": "korting_hoeveelheid"
+                    })
+                continue
 
     return all_rows
 
 @app.route("/", methods=["GET"])
 def health():
-    return "OK", 200
+    return "OK", 200  # keep open or also guard—your choice
 
 @app.route("/", methods=["POST"])
 def parse():
+    # --- SECURITY: enforce shared-secret header
+    if not has_valid_secret(request):
+        return jsonify({"error": "unauthorized"}), 401
+
     if "file" not in request.files:
         return jsonify({"error": "no file"}), 400
     f = request.files["file"]
